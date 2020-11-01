@@ -1,0 +1,29 @@
+---
+layout: default
+---
+
+<style>
+.content2 {
+  flex-grow: 1;
+}
+
+.wrapper2 {
+  width: 1050px;
+  max-width: 100%;
+  margin: 0 auto;
+  position: relative;
+}
+</style>
+
+<div class="flex-container">
+  {% include header.html %}
+<div style="position:absolute; right:10px; top:50px; z-index:9999; border-style:outset;border:thin solid gray; border-width:px; display:none;" id="results-container">
+</div>
+
+  <div class="content2 wrapper2">
+    {{ content }}
+  {% include search.html %}
+  <!--{% include pagination.html %}-->
+  </div> <!-- End Wrapper -->
+  {% include footer.html %}
+</div>

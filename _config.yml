@@ -1,0 +1,67 @@
+title: Koen Serneels Technology Blog
+description: > # this means to ignore newlines until "baseurl:"
+  Write an awesome description for your new site here. You can edit this
+  line in _config.yml. It will appear in your document head meta (for
+  Google search results) and in your feed.xml site description.
+permalink: ':title/'
+baseurl: "/blog" # the subpath of your site, e.g. /blog
+url: "https://crunchtech.io" # the base hostname & protocol for your site, e.g. http://example.com
+
+# Author settings
+author: Koen Serneels # add your name
+author-pic: ks-face.png
+
+# Contact links
+linkedin: koen-serneels-75213b5
+website: crunchtech.io
+github: koen-serneels
+
+# Newsletter
+mailchimp: # Add your MailChimp form identifier.
+
+# Disqus
+discus_identifier: crunchtech
+
+# Tracker
+analytics: # Google Analytics
+
+# Paginate
+paginate: 10
+paginate_path: /page:num/
+
+# Build settings
+markdown: kramdown
+
+markdown: kramdown
+# !github-pages! mandatory › https://help.github.com/articles/using-jekyll-with-pages/#configuration-settings-you-cannot-change
+# Since Jekyll 3 the default highlighter is Rouge (replaced Pygments.rb in v44)
+highlighter: rouge
+
+# More › http://kramdown.gettalong.org/quickref.html
+# Options › http://kramdown.gettalong.org/options.html
+kramdown:
+  input:          GFM
+  # https://github.com/jekyll/jekyll/pull/4090
+  syntax_highlighter: rouge
+
+  # Rouge Highlighter in Kramdown › http://kramdown.gettalong.org/syntax_highlighter/rouge.html
+  # span, block element options fall back to global
+  syntax_highlighter_opts:
+    # Rouge Options › https://github.com/jneen/rouge#full-options
+    css_class: 'highlight'
+    #line_numbers: true # bad idea, spans don't need linenos and would inherit this option
+    span:
+      line_numbers: false
+    block:
+      line_numbers: true
+      start_line: 1
+sass:
+    sass_dir: _sass
+
+plugins:
+  - jekyll-paginate
+  - jekyll-feed
+  - jekyll-sitemap
+
+include: [_pages]
+exclude: ["node_modules", "gulpfile.js", "package.json", "yarn.lock"]

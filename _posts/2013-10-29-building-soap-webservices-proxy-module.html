@@ -1,0 +1,398 @@
+---
+layout: post
+title: Building a SOAP Webservices Proxy Module using Spring Webservices
+date: '2013-10-29T16:55:00.001+01:00'
+author: Koen Serneels
+img: 2014-01-04-git-keeping-your-history-clean/background.jpeg
+tags:
+- Web Services
+---
+
+Some time ago I wanted to see how easy it is to write a web services proxy (wsproxy) using Spring Web Services. So, I thought I would share the result on Github. <a href="https://github.com/koen-serneels/ws-proxy/" target="_blank">Feel free to use it</a> (Apache v2 license) or let it serve as basis for your own development. The remainder of the article will explain the idea, how I used Spring web services to build it and a short guide on how to use the current implementation.
+
+A wsproxy in this context is a central soap aware access layer which relays messages between systems. This relaying works in two directions; for services hosted internally (inbound mode) but also for services hosted externally were we are the client (outbound mode). One can compare this with a traditional http forward/reverse proxy but instead of operating on application transport it goes one level higher in the stack and deals with application messages; in this case soap. In outbound mode our internal services will (normally) use the wsproxy as a http forward proxy. It will then deal with delivering the received message to the actual target. For inbound mode the module will act as a reverse proxy accepting incoming messages from external clients and relay them to our internal services.
+
+Before we continue, a few words about forward/reverse proxies:
+
+A forward proxy is something the client explicitly configures in addition to specifying a target URL. The http stack of the client will send the message to the configured proxy and sent the host/port of the actual desired target host via http headers (Host header). The proxy then deals with forwarding the request to the desired target host/port and return the response to the client. Thus the proxy composes the host and port for the target URL out of the http Host header. For the path it will use the path from the request as received from the client. A reverse proxy behaves (from the point of the client) as the actual target server. The client is not aware of any proxies and does neither have to configure anything special. What the client uses as target URL is the URL of the reverse proxy. The reverse proxy will be able to intercept the message from the client and forward it to the actual target within the network. The reverse proxy will required extra configuration as for example the URL (host, port and possibly path) of the target service, as host/port cannot be deduced from the request or http headers.
+
+When using this module, one can still implement an actual http reverse proxy on boundaries for TLS offloading or other transport purposes. For external inbound traffic (messages coming from external clients destined for internal service) the wsproxy module will simply be the second reverse proxy in line for incoming requests. For internal outbound traffic (messages from internal clients destined for external endpoints) the URL of the http reverse proxy will be configured as the target URL for that specific service on the wsproxy module.
+
+One of the features of having such a soap aware wsproxy is centralizing concerns. The goal is that soap traffic passing through can be intercepted. This way we can implement things such as: audit logging, monitoring, access control, message security, ... doing so we create a centralized place to deal with these requirements instead of having to re-implement them per application.
+
+<div class="separator" style="clear: both; text-align: center;"><a class="image-link" href="{{site.baseurl}}/assets/img/2013-10-29-building-soap-webservices-proxy-module/wsproxy-usages.png" imageanchor="1" style="margin-left: 1em; margin-right: 1em;"><img border="0" height="244" src="{{site.baseurl}}/assets/img/2013-10-29-building-soap-webservices-proxy-module/wsproxy-usages.png" width="540" /></a></div>
+
+I chose Spring web services because there is no complicated infrastructure or design to understand. It it also very extensible and offers re-use at the right level for our requirements.
+However, at this time I should also point out that there are existing solutions out there which can do this as well and more. They often go under the name of xml security gateways and come as software package or fully equipped appliances. As always you should outweigh the benefits of these existing solutions over writing something yourself. Fact is that they don't come for free (to say the least) and you still need someone with the right skills for configuring and maintaining them. As we will see, our requirements are easy to fulfill with a bit of code (and the help of Spring Web Services) giving us all the control we need.
+
+For the requirements I had an easy to extend design in mind with following out of the box requirements: 
+
+<ul>
+	<li>Outbound mode needs to be configuration free for standard usages. This means that when needing to access a new external services our proxy should relay messages without requiring extra configuration</li>
+	<li>Messages passing the gateway need to be logged. Without extra configuration the entire message should be logged by default. Optionally, we need to be able to configure more fine grained which parts needs to be logged for specific services</li>
+	<li>For (mostly external) outbound communication we should be able to configure a forward proxy or override the target with a pre-configured host (an existing reverse proxy or the actual endpoint) </li>
+	<li>The module must be able to forward messages over secure transport in case there is no external reverse proxy present for offloading outbound secure transport. For inbound secure transport we will let this be handled by the container where the module is running on; so this is out of scope for the module</li>
+	<li>Be able to apply and handle message integrity/confidentiality</li>
+</ul>
+
+The component design looks like this:
+
+<div class="separator" style="clear: both; text-align: center;"><a class="image-link" href="{{site.baseurl}}/assets/img/2013-10-29-building-soap-webservices-proxy-module/wsproxy-components.png" imageanchor="1" style="margin-left: 1em; margin-right: 1em;"><img border="0" height="244" src="{{site.baseurl}}/assets/img/2013-10-29-building-soap-webservices-proxy-module/wsproxy-components.png" width="540" /></a></div>
+
+There are 3 main components. The <a href="https://github.com/koen-serneels/ws-proxy/blob/master/src/main/java/be/error/wsproxy/core/CatchAllEndpoint.java" target="_blank">endpoint</a> (catch-all endpoint in the drawing), which will act as the receiver for the message being sent to the wsproxy. The <a href="https://github.com/koen-serneels/ws-proxy/blob/master/src/main/java/be/error/wsproxy/core/ForwardingClient.java" target="_blank">forwarder</a>, which will relay the message to the target. Finally, the interceptor chains are the hooks where we are able to intercept the messages being sent/received and do something with them.
+
+These 3 components are offered by Spring Web Services; the endpoint is a <i>org.springframework.ws.server.endpoint.annotation.Endpoint</i> implementing <i>org.springframework.ws.server.endpoint.MessageEndpoint</i> to be able to receive the raw payload. The forwarder uses <i>org.springframework.ws.client.core.WebServiceTemplate</i> and the interceptor chains are <i>org.springframework.ws.client.support.interceptor.ClientInterceptor</i> and/or <i>org.springframework.ws.server.EndpointInterceptor</i> depending on which sides they need to function (more on that later). For message security we will use WSS4J, but this is just an implementation of an interceptor, thus not a new component.
+
+It is important to realize that there are two interceptor chains. From the point of the wsproxy, we'll call the first one the "inbound chain". This is the one operating between  the client and the wsproxy. The "outbound chain" is the one operating between the wsproxy and target endpoint. So, if we have an internal client accessing an external endpoint via our wsproxy, the inbound chain will be invoked when the message is received by the wsproxy. The outbound chain will be invoked from the moment the wsproxy relays the message to the target endpoint. Spring has two interfaces to distinguish on which "side" the interceptor operates (an interceptor can also implement both interfaces, making it able to function on both sides). The <i>org.springframework.ws.server.EndpointInterceptor</i> operates on the endpoint side, for the wsproxy this is inbound. The <i>org.springframework.ws.client.support.interceptor.ClientInterceptor</i> operates on the client side, so for the wsproxy this is outbound. Btw; we're using inbound and outbound rather then the original Spring naming (client/endpoint) to avoid confusion. As you've noticed by now, the wsproxy is also an endpoint and a client. However, when we refer to "client" we mean the actual service client and the "endpoint" is the actual target service.
+
+The module itself will run on a standard JEE servlet container as your typical Spring application. For all inbound traffic the http (or https) connector from the container is used.  For all outbound traffic the WebServiceTemplate is used configured with commons httpclient under the hood, which we'll be able to use for both http and https if required. Service identification is done the "doclit" style. This means we take the first element of the body including it's namespace. This is represented as a <a href="http://docs.oracle.com/javase/7/docs/api/javax/xml/namespace/QName.html" target="_blank">QName</a>. This identification is important as we'll have configuration on a per service basis, such as the forward proxy, forwarding protocol, endpoint URL mapping, specific loggers etc.
+
+Ok enough of this. let's take this baby for a spin! Import the project in your IDE of choice, make sure you import it as a Maven project as Maven will have to filter the file <a href="https://github.com/koen-serneels/ws-proxy/blob/master/src/main/resources/active_environment.properties" target="_blank">active_environment.properties</a> (this is done automatically via the default profile). Then we will:  
+
+<ul>
+	<li>Setup a normal standalone soap based endpoint</li>
+	<li>Deploy wsproxy</li>
+	<li>Use a web services client to access the endpoint via the proxy module</li>
+</ul>
+
+For bootstrapping a simple endpoint there is a class <a href="https://github.com/koen-serneels/ws-proxy/blob/master/src/test/java/be/error/wsproxy/SimpleEndpoint.java" target="_blank">SimpleEndpoint</a> foreseen in the tests sources which uses the JDK internal JAX-WS and http server to bootstrap a webservice endpoint: 
+
+ <pre class="brush: java;">
+public class SimpleEndpoint {
+	public static void main(String args[]) {
+		Endpoint.publish("http://localhost:9999/simple", new SimpleWebServiceEndpoint());
+		
+		@WebService
+		public static class SimpleWebServiceEndpoint {
+			public Date getCurrentDate(String randomParameter) {
+				return new Date();
+				}
+			}
+		}
+	}
+</pre> 
+ 
+ Just run this as a new Java application, it will remain running until the process is killed. Boot the wsproxy by deploying the project to your server of choice (I'll be using Tomcat7), there is no extra configuration required. As for the client we'll be using soap-ui (you can also use cURL if you like). In soap-ui we first have to create the project. We do this based on the WSDL exposed by our test service (accessible under http://localhost:9999/simple?WSDL). Next, we'll have to configure our wsproxy module as the http forward proxy in soap-ui:  
+ 
+ <table>
+ <tr>
+ <td>
+ <div class="separator" style="clear: both; text-align: center;"><a class="image-link" href="{{site.baseurl}}/assets/img/2013-10-29-building-soap-webservices-proxy-module/soap-ui-2.png" imageanchor="1" style="margin-left: 1em; margin-right: 1em;"><img border="0" height="244" src="{{site.baseurl}}/assets/img/2013-10-29-building-soap-webservices-proxy-module/soap-ui-2.png" width="540" /></a></div>
+ </td>
+ <td>
+ <div class="separator" style="clear: both; text-align: center;"><a class="image-link" href="{{site.baseurl}}/assets/img/2013-10-29-building-soap-webservices-proxy-module/soap-ui-1.png" imageanchor="1" style="margin-left: 1em; margin-right: 1em;"><img border="0" height="244" src="{{site.baseurl}}/assets/img/2013-10-29-building-soap-webservices-proxy-module/soap-ui-1.png" width="540" /></a></div>
+ </td>
+ </tr>
+ </table>
+ 
+ The soap-ui projects are also <a href="https://github.com/koen-serneels/ws-proxy/tree/master/src/test/soapui" target="_blank">availale in the project</a> if you want. <b>Don't forget to enable the proxy settings as explained above, they are not saved as part of the project.</b> 
+ 
+ <b>Important:</b> don't forget to disable the proxy settings again if you are starting with a new project. soap-ui will use the proxy settings for standard http traffic and not only for soap/http. For example; when creating a new project based on a WSDL URL, soap-ui will use the http proxy settings as well to retrieve the WSDL. Since the wsproxy module is not a pure http proxy (but a soap proxy instead) it will not allow non-soap traffic through.
+ 
+ The last thing we need to configure is the target URL in soap-ui. The wsproxy module is by default (on tomcat at least) deployed under the context root named after the filename. In our case this means the module is reachable under: http://localhost:8080/ws-proxy/ 
+ There are two options:  
+ <ul>
+	<li>Deploy the module under the root of the application server (/) instead. In that case nothing needs to be changed to the target URL. The target URL will remain the same URL as you would be using without the proxy module</li><li>Use a context root of choice, but in that case you'll have to prefix the context root to the target URL</li>
+</ul> 
+
+In our case we are in the second scenario, this means that we'll have to change the proposed target URL from "http://localhost:9999/simple" to "http://localhost:9999/<b>ws-proxy</b>/simple". 
+
+What happens is that soap-ui sends the request to the host/port specified in the proxy settings (it will thus not sent the request to localhost:9999 but to localhost:8080 instead). The path however is retained; the request is  actually sent to localhost:8080 with path "ws-proxy/simple". With the module deployed under "ws-proxy" you can now see why this path prefix has to be there. If the path would start with "simple" we would get a 404. The remainder of the path is not important for the infrastructure, as the Spring dispatcher servlet (configuration can be found in <a href="https://github.com/koen-serneels/ws-proxy/blob/master/src/main/java/be/error/wsproxy/configuration/core/WsProxyWebApplicationInitializer.java" target="_blank">WsProxyWebApplicationInitializer</a>) is bound to "/*". So every subsequent path is treated by the servlet in every case.
+
+To be able to forward the message to the actual target, the module will calculate the target URL:  
+ <ul>
+	<li>First check if there is a pre-configured target URL for the given endpoint based upon the service identification (payload root element + namespace). This is configured in <a href="https://github.com/koen-serneels/ws-proxy/blob/master/src/main/java/be/error/wsproxy/configuration/properties/EndpointTargetUrlMapping.java" target="_blank">EndpointTargetUrlMapping</a> as we will see later.
+	</li>
+	<li>If nothing found, check if there is a http Host header present, use host:port as the target server. For the path, use the path as present in the request, but subtract the context root under which this module is deployed (if any)
+	</li>
+</ul> 
+
+The latter means that in our case the module is deployed under "ws-proxy" and the request path is "ws-proxy/simple", which will result in a target URL of "http://localhost:999/simple" When executing the request, we'll get this answer:
+
+<div class="separator" style="clear: both; text-align: center;"><a class="image-link" href="{{site.baseurl}}/assets/img/2013-10-29-building-soap-webservices-proxy-module/soap-ui-4.png" imageanchor="1" style="margin-left: 1em; margin-right: 1em;"><img border="0" height="244" src="{{site.baseurl}}/assets/img/2013-10-29-building-soap-webservices-proxy-module/soap-ui-4.png" width="540" /></a></div>
+ 
+In the wsproxy log file we can see the intercepted request and response being logged:  
+
+<pre class="brush: xml;">
+51948 [http-bio-8080-exec-5] DEBUG be.error.wsproxy.interceptors.internalchain.LoggingInterceptor  - SID:{http://wsproxy.error.be/}getCurrentDate INBOUND SIDE Request:<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:wsp="http://wsproxy.error.be/">
+   <soapenv:Header/>
+   <soapenv:Body>
+      <wsp:getCurrentDate>
+         <!--Optional:-->
+         <arg0>?</arg0>
+      </wsp:getCurrentDate>
+   </soapenv:Body>
+</soapenv:Envelope>
+ 
+51949 [http-bio-8080-exec-5] DEBUG be.error.wsproxy.core.ForwardingClient  - Using information from Host header as hostname/port
+51949 [http-bio-8080-exec-5] DEBUG be.error.wsproxy.core.ForwardingClient  - Got webservice forwarding request, sending to:http://localhost:9999/simple
+51981 [http-bio-8080-exec-5] DEBUG be.error.wsproxy.core.ForwardingClient  - Using interceptors:[class be.error.wsproxy.interceptors.externalchain.HttpRequestHeaderTransfererInterceptor]
+51981 [http-bio-8080-exec-5] DEBUG be.error.wsproxy.core.ForwardingClient$3  - Opening [org.springframework.ws.transport.http.HttpComponentsConnection@1dd5e19a] to [http://localhost:9999/simple]
+51991 [http-bio-8080-exec-5] DEBUG be.error.wsproxy.core.ForwardingClient  - Forwarding (http://localhost:9999/simple) done.
+51994 [http-bio-8080-exec-5] DEBUG be.error.wsproxy.interceptors.internalchain.LoggingInterceptor  - SID:{http://wsproxy.error.be/}getCurrentDate INBOUND SIDE Response:<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<S:Envelope xmlns:S="http://schemas.xmlsoap.org/soap/envelope/">
+  <S:Body>
+    <ns2:getCurrentDateResponse xmlns:ns2="http://wsproxy.error.be/">
+      <return>2013-10-28T15:55:29.717+01:00</return>
+    </ns2:getCurrentDateResponse>
+  </S:Body>
+</S:Envelope>
+</pre>
+
+
+ In the default setup default logging happens on the inbound side. The inbound interceptors are configure <a href="https://github.com/koen-serneels/ws-proxy/blob/master/src/main/java/be/error/wsproxy/configuration/interceptors/InboundInterceptors.java" target="_blank">here</a>:  
+ 
+ <pre class="brush: java;">
+@Configuration
+public class InboundInterceptors {
+ 
+ @Autowired
+ private PayloadRootAnnotationMethodEndpointMapping catchAllEndpointMapping;
+ @Autowired
+ private MessageDispatcher messageDispatcher;
+ 
+ @Configuration
+ public static class FirstInlineInterceptors {
+  @Bean
+  public DelegatingSmartSoapEndpointInterceptor loggingInterceptor() {
+   return new DelegatingSmartSoapEndpointInterceptor(new LoggingInterceptor());
+  }
+ }
+ 
+ @Configuration
+ public static class ServiceSpecificInterceptors {
+ 
+ }
+ 
+ @Configuration
+ public static class LastInLineInterceptors {
+ 
+ }
+}
+ </pre>
+
+ If you want to configure this logging interceptor also on the outbound side, you can add them in <a href="https://github.com/koen-serneels/ws-proxy/blob/master/src/main/java/be/error/wsproxy/configuration/interceptors/OutboundInterceptors.java" target="_blank">OutboundInterceptors</a>. <a href="https://github.com/koen-serneels/ws-proxy/blob/master/src/main/java/be/error/wsproxy/interceptors/logging/LoggingInterceptor.java" target="_blank">LoggingInterceptor</a> both implements <i>EndpointInterceptor</i> and <i>ClientInterceptor</i>. To continue with our requirements, there is also an interceptor which is able to log fragments based on XPath expression. The <a href="https://github.com/koen-serneels/ws-proxy/blob/master/src/main/java/be/error/wsproxy/interceptors/logging/LoggingXPathInterceptor.java" target="_blank">LoggingXPathInterceptor</a> is service specific and hence we'll be adding this one to the ServiceSpecificInterceptors. The difference is that service specific interceptors use <a href="http://docs.spring.io/spring-ws/site/apidocs/org/springframework/ws/soap/server/endpoint/interceptor/PayloadRootSmartSoapEndpointInterceptor.html" target="_blank">PayloadRootSmartSoapEndpointInterceptor</a> which we need to give namespace and payload root element to identify the service. The configured interceptor will only be invoked for that service. The first in line and last in line use <a href="http://docs.spring.io/spring-ws/site/apidocs/org/springframework/ws/soap/server/endpoint/interceptor/DelegatingSmartSoapEndpointInterceptor.html" target="_blank">DelegatingSmartSoapEndpointInterceptor</a> which will be invoked for any request.  
+ 
+ <pre class="brush: java;">
+@Configuration
+public static class ServiceSpepcificInterceptors {
+ @Bean
+ public PayloadRootSmartSoapEndpointInterceptor getCurrentDateLoggingInterecptor() {
+  LoggingXPathInterceptor loggingXPathInterceptor = new LoggingXPathInterceptor();
+  loggingXPathInterceptor.addRequestXPaths(new WebServiceMessageXPathExpressionMetaData(
+    "//*[local-name()='arg0']", "requestParameter"));
+  loggingXPathInterceptor.addResponseXPaths(new WebServiceMessageXPathExpressionMetaData(
+    "//*[local-name()='return']", "responseParameter"));
+  return new PayloadRootSmartSoapEndpointInterceptor(loggingXPathInterceptor, "http://wsproxy.error.be/",
+    "getCurrentDate");
+ }
+}
+ </pre> 
+ 
+ When we execute the request again in soap-ui, we can see that the request argument and response value are extracted logged to our log file:  
+ 
+ <pre class="brush: xml;">
+DEBUG be.error.wsproxy.interceptors.internalchain.LoggingXPathInterceptor - SID:{http://wsproxy.error.be/}getCurrentDate XPATHID:requestParameter VALUE:?
+DEBUG be.error.wsproxy.interceptors.internalchain.LoggingXPathInterceptor - SID:{http://wsproxy.error.be/}getCurrentDate XPATHID:responseParameter VALUE:2013-10-28T16:50:29.537+01:00
+</pre> 
+
+The <a href="https://github.com/koen-serneels/ws-proxy/blob/master/src/main/java/be/error/wsproxy/interceptors/logging/WebServiceMessageXPathExpressionMetaData.java" target="_blank">WebServiceMessageXPathExpressionMetaData</a> operates by default on the soap body (payload) and treats the given XPaths as mandatory (but non blocking). To see other options check the javadoc on <a href="https://github.com/koen-serneels/ws-proxy/blob/master/src/main/java/be/error/wsproxy/interceptors/logging/WebServiceMessageXPathExpressionMetaData.java" target="_blank">WebServiceMessageXPathExpressionMetaData</a>.
+
+The properties that can be configured are located in the package <i>be.error.wsproxy.configuration.properties</i>. Following classes exist:  <ul><li><a href="https://github.com/koen-serneels/ws-proxy/blob/master/src/main/java/be/error/wsproxy/configuration/properties/EndpointProtocolMapping.java" target="_blank">EndpointProtocolMapping</a></li><li><a href="https://github.com/koen-serneels/ws-proxy/blob/master/src/main/java/be/error/wsproxy/configuration/properties/EndpointTargetUrlMapping.java" target="_blank">EndpointTargetUrlMapping</a></li><li><a href="https://github.com/koen-serneels/ws-proxy/blob/master/src/main/java/be/error/wsproxy/configuration/properties/ForwardProxy.java" target="_blank">ForwardProxy</a></li><li><a href="https://github.com/koen-serneels/ws-proxy/blob/master/src/main/java/be/error/wsproxy/configuration/properties/Keystores.java" target="_blank">Keystores</a></li></ul> The default Spring profile "local", enabled via Maven the default Maven filter, will resolve them from the properties file in <a href="https://github.com/koen-serneels/ws-proxy/blob/master/config/wsproxy-local-config/wsproxy_local_demo.properties" target="_blank">wsproxy_local_demo.properties</a>. The configuration is always stored as a simple string allowing for easy externalization in for example a JNDI environment. The three first properties determine how messages will be forwarded, to start with EndpointProtocolMapping:
+
+In the above scenario the target URL was automatically deduced from the Host parameters as our internal client was using the module as a forward proxy. Since the host parameters do not contain any notion about protocols, the wsproxy assumed http as the forwarding protocol by default. If don't have a reverse proxy which takes care of offloading TLS, you can ask the proxy module to forward over https instead. You can do this by setting the protocol mapping to https for a specific service:  
+
+<pre class="brush: xml;">endpoint.protocol.mapping={namespace}payloadRootElementLocalName=https,...</pre> 
+
+EndpointTargetUrlMapping allows to define the target URL directly. This is required in the scenario where an external client will be accessing our internal service. In that case the target URL can no longer be deduced; external clients will not use our module as forward proxy but the message will simply end up on our module as it would be the actual service. The module then needs to know to where it should forward the message to: 
+
+<pre class="brush: xml;">endpoint.target.url.mapping={namespace}payloadRootElementLocalName=http(s)://host:port/path,....</pre> 
+
+This can also be used to override the target URL all together. The forwarder will first look if there is an explicit URL defined for the given service, if so that one will be given precedence.
+
+The ForwardProxy can be configured when the wsproxy module on its turn needs to communicate via a http forward proxy in order to reach the target. This is also configurable on a per service basis.  
+
+<div class="separator" style="clear: both; text-align: center;"><a class="image-link" href="{{site.baseurl}}/assets/img/2013-10-29-building-soap-webservices-proxy-module/wsproxy-proxy.png" imageanchor="1" style="margin-left: 1em; margin-right: 1em;"><img border="0" height="244" src="{{site.baseurl}}/assets/img/2013-10-29-building-soap-webservices-proxy-module/wsproxy-proxy.png" width="540" /></a></div>
+
+Remember that the forward proxy does not change anything on how the target URL is calculated. Instead of directly accessing the target URL, the message will be forward to the configurered proxy if the setting is used:  
+
+<pre class="brush: xml;">forward.proxy=={namespace}payloadRootElementLocalName=host:port,... </pre>
+
+The keystores point to the keystore configuration containing store location, store password, key alias and key password. They are used when we want to apply message security which we'll cover next.  
+
+<pre class="brush: xml;">
+keystores.location=${project.root.dir}/config/test-keystores
+keystore=${keystores.location}/keystore.jks
+keystore.password=changeme
+key.alias=mykey
+key.password=changeme
+truststore=${keystores.location}/truststore.jks
+truststore.password=changeme
+</pre> 
+
+To satisfy the last requirement (integrity/confidentiality) we'll be using WSS4J via the Spring Wss4jSecurityInterceptor. This interceptor needs to be configured on the outbound side in our example were we have an internal client accessing an external service. The steps we will perform:  
+<ul>
+	<li>Setup a secured standalone soap based endpoint</li>
+	<li>Configure the wsproxy with message security for the given service</li>
+	<li>Deploy wsproxy</li><li>Use a web services client to access the endpoint via the proxy module</li>
+</ul>
+
+For the secured endpoint <a href="https://github.com/koen-serneels/ws-proxy/blob/master/src/test/java/be/error/wsproxy/SimpleSecuredEndpoint.java" target="_blank">SimpleSecuredEndpoint</a> is foreseen using JAXWS and WSIT. The WSIT configuration can be found in <a href="https://github.com/koen-serneels/ws-proxy/blob/master/src/test/resources/META-INF/wsit-be.error.wsproxy.SimpleSecuredEndpoint%24SimpleWebServiceEndpoint.xml" target="_blank">META-INF/wsit-be.error.wsproxy.SimpleSecuredEndpoint$SimpleWebServiceEndpoint.xml</a> enabling message integrity on our endpoint. 
+
+<pre class="brush: java;">
+public class SimpleSecuredEndpoint {
+ 
+ public static void main(String args[]) throws IOException {
+  // Set WSIT_HOME manually, we're only using this for testing purposes. This way we can have a dynamic path based
+  // on the project location in filesystem to resolve the keystores via the WSIT configuratin in META-INF
+  System.setProperty("WSIT_HOME", new ClassPathResource("").getFile().getParent() + "/../config/test-keystores/");
+  Endpoint.publish("http://localhost:9999/simple", new SimpleWebServiceEndpoint());
+ }
+ 
+ @WebService(serviceName = "SimpleEndpoint")
+ @Addressing(enabled = false, required = false)
+ public static class SimpleWebServiceEndpoint {
+  public Date getCurrentDateSecured(String randomParameter) {
+   return new Date();
+  }
+ }
+}
+</pre> 
+
+<b>Important:</b> the JAXWS implementation shipped with the JDK does not contain WSIT. It is just the JAXWS RI. In order for this to work you'll have to download the latest Metro release yourself which bundles everything together. See <a href="https://metro.java.net/" target="_blank">Metro home page</a>. When you've downloaded Metro, run SimpleSecuredEndpoint passing along the endorsed system property: <b>-Djava.endorsed.dirs=/path_to_metro/lib</b>. This will ensure the entire JAXWS implementation is used from the external libraries. When everything is running fine you'll be seeing a line: <i>INFO: WSP5018: Loaded WSIT configuration from file: file:/home/koen/....</i>.
+
+The configuration of the WSS4J interceptor enabling message integrity in <a href="https://github.com/koen-serneels/ws-proxy/blob/master/src/main/java/be/error/wsproxy/configuration/interceptors/OutboundInterceptors.java" target="_blank">OutboundInterceptors</a>: 
+
+<pre class="brush: java;">
+@Bean
+ public Map&lt;QName, List&lt;ClientInterceptor&gt;&gt; customClientInterceptors() throws Exception {
+  Map&lt;QName, List&lt;ClientInterceptor&gt;&gt; mapping = new HashMap&lt;&gt;();
+ 
+  List&lt;ClientInterceptor&gt; list = new ArrayList&lt;&gt;();
+  list.add(getCurrentDateServiceSecurityInterceptor());
+  list.add(new LoggingInterceptor());
+  mapping.put(new QName("http://wsproxy.error.be/", "getCurrentDateSecured"), list);
+ 
+  return mapping;
+ }
+ 
+ private Wss4jSecurityInterceptor getCurrentDateServiceSecurityInterceptor() throws Exception {
+  Wss4jSecurityInterceptor interceptor = new Wss4jSecurityInterceptor();
+ 
+  // Outgoing
+  interceptor.setSecurementActions("Signature Timestamp");
+  interceptor
+    .setSecurementSignatureParts("{}{http://schemas.xmlsoap.org/soap/envelope/}Body;{}{http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd}Timestamp");
+  interceptor.setSecurementSignatureKeyIdentifier("IssuerSerial");
+  Pair&lt;String, String&gt; key = keystore.getKeyAliasPasswords().get(0);
+  interceptor.setSecurementUsername(key.getLeft());
+  interceptor.setSecurementPassword(key.getRight());
+  interceptor.setSecurementSignatureAlgorithm("http://www.w3.org/2000/09/xmldsig#rsa-sha1");
+  interceptor.setSecurementSignatureDigestAlgorithm("http://www.w3.org/2000/09/xmldsig#sha1");
+  interceptor.setSecurementTimeToLive(700);
+  interceptor.setValidationTimeToLive(700);
+  interceptor.setSecurementSignatureCrypto(keystoreCrypto);
+ 
+  // Incomming
+  interceptor.setValidationActions("Timestamp Signature");
+  interceptor.setValidationSignatureCrypto(truststoreCrypto);
+ 
+  return interceptor;
+ }
+</pre>
+
+On line 6 and 7 we add the custom interceptor to the list of interceptors used by the ForwardingClient. We've also added the LoggingInterceptor on the outbound so we can see the secured messages going out and coming in. To test the message security configuration deploy the wsproxy and use soap-ui to fire the request. The soap-ui setup is no different then setup for the non-secured endpoint.
+
+<b>Important:</b>There seems to be an issue with C14N. When the request is sent as normal, WSIT will complain that the calculated digest does not match with the one in the message. I'm going to investigate this further, but this appears to be a problem of WSIT and not WSS4J, since the same problem also happens when soap-ui is configured as a secured client and directly communicates with the endpoint rather then using the wsproxy module. To get around this and see the test working, remove the line feed between the soap Body start element and the payload root start element. Also remove the line feed between the soap Body end element and the payload root end element: 
+
+<pre class="brush: xml; highlight: [3, 6];">
+&lt;soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:wsp="http://wsproxy.error.be/"&gt;
+   &lt;soapenv:Header/&gt;
+   &lt;soapenv:Body&gt;&lt;wsp:getCurrentDateSecured&gt;²
+         &lt;!--Optional:--&gt;
+         &lt;arg0&lgt;?&lt;/arg0&gt;
+ &lt;/wsp:getCurrentDateSecured&lt;&lt;/soapenv:Body&gt;
+&lt;/soapenv:Envelope&gt;
+</pre>
+
+The soap-ui projects are also <a href="https://github.com/koen-serneels/ws-proxy/tree/master/src/test/soapui" target="_blank">availale in the project</a> if you want. <b>Don't forget to enable the proxy settings as explained before, they are not saved as part of the project.</b>
+The result:
+
+  <pre class="brush: xml;">
+  &lt;S:Envelope xmlns:S="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" xmlns:exc14n="http://www.w3.org/2001/10/xml-exc-c14n#" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd" xmlns:xs="http://www.w3.org/2001/XMLSchema"&gt;
+   &lt;S:Header/&gt²;
+   &lt;S:Body wsu:Id="_5002"&gt²;
+      &lt;ns2:getCurrentDateSecuredResponse xmlns:ns2="http://wsproxy.error.be/"&gt²;
+         &lt;return&lt;2013-10-29T14:26:25.789+01:00&gt;/return&gt²;
+      &lt;/ns2:getCurrentDateSecuredResponse&gt;
+   &lt;/S:Body&gt;
+&lt;/S:Envelope&gt;
+  </pre> 
+  
+ Nothing spectacular as the wsproxy added message security when forwarding the request and removed it when returning the response. If we look at the wsproxy log files, we'll first see the request entering on the inboud side:  
+  
+ <pre class="brush: xml;">
+  34   [http-bio-8080-exec-3] DEBUG be.error.wsproxy.interceptors.logging.LoggingInterceptor  - SID:{http://wsproxy.error.be/}getCurrentDate INBOUND SIDE Request:&lt;?xml version="1.0" encoding="UTF-8" standalone="no"?&gt;
+&lt;soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:wsp="http://wsproxy.error.be/"&gt;
+   &lt;soapenv:Header/>
+   &lt;soapenv:Body>
+    &lt;wsp:getCurrentDateSecured>
+         &lt;!--Optional:-->
+         &lt;arg0>?&gt;/arg0&gt;
+ &lt;/wsp:getCurrentDateSecured&gt;
+  &lt;/soapenv:Body&gt;
+&lt;/soapenv:Envelope&gt;
+ </pre>
+  
+The request is secured and forward to the endpoint:  
+  
+  <pre class="brush: xml;">
+  394  [http-bio-8080-exec-3] DEBUG be.error.wsproxy.interceptors.logging.LoggingInterceptor  - SID:{http://wsproxy.error.be/}getCurrentDate OUTBOUND SIDE Request:&lt;?xml version="1.0" encoding="UTF-8" standalone="no"?&gt;
+&lt;soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:wsp="http://wsproxy.error.be/"&gt;
+   &lt;soapenv:Header&gt;
+    &lt;wsse:Security xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd" soapenv:mustUnderstand="1"&gt;
+      &lt;wsu:Timestamp wsu:Id="TS-518848887F924441AB13830540361321"&gt;
+        &lt;wsu:Created&gt;2013-10-29T13:40:36.130Z&lt;/wsu:Created&gt;
+        &lt;wsu:Expires&gt;2013-10-29T13:45:36.130Z&lt;/wsu:Expires&gt;
+      &lt;/wsu:Timestamp&gt;
+      &lt;ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#" Id="SIG-518848887F924441AB13830540361916"&gt;
+        &lt;ds:SignedInfo&gt;
+...
+ </pre>
+  
+ The secured response is received from the endpoint;  
+ 
+ <pre class="brush: xml;"> 
+  524  [http-bio-8080-exec-3] DEBUG be.error.wsproxy.interceptors.logging.LoggingInterceptor  - SID:{http://wsproxy.error.be/}getCurrentDate OUTBOUND SIDE Response:&lt;?xml version="1.0" encoding="UTF-8" standalone="no"?&gt;
+&lt;S:Envelope xmlns:S="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" xmlns:exc14n="http://www.w3.org/2001/10/xml-exc-c14n#" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd" xmlns:xs="http://www.w3.org/2001/XMLSchema"&gt;
+  &lt;S:Header&gt;
+    &lt;wsse:Security S:mustUnderstand="1"&gt;
+      &lt;wsu:Timestamp xmlns:ns15="http://www.w3.org/2003/05/soap-envelope" xmlns:ns16="http://docs.oasis-open.org/ws-sx/ws-secureconversation/200512" wsu:Id="_3"&gt;
+        &lt;wsu:Created&gt;2013-10-29T13:40:36Z&lt;/wsu:Created&gt;
+        &lt;wsu:Expires&gt;2013-10-29T13:45:36Z&lt;/wsu:Expires&gt;
+      &lt;/wsu:Timestamp&gt;
+      &lt;ds:Signature xmlns:ns15="http://www.w3.org/2003/05/soap-envelope" xmlns:ns16="http://docs.oasis-open.org/ws-sx/ws-secureconversation/200512" Id="_1"&gt;
+        &lt;ds:SignedInfo&gt;
+...
+ </pre>
+ 
+ Security information is processed and validated. If ok, the security information is stripped and the response returned (to our client, soap-ui in this case):  
+ 
+ <pre class="brush: xml;">
+ 567  [http-bio-8080-exec-3] DEBUG be.error.wsproxy.interceptors.logging.LoggingInterceptor  - SID:{http://wsproxy.error.be/}getCurrentDate INBOUND SIDE Response:&lt;?xml version="1.0" encoding="UTF-8" standalone="no"?&gt;
+&lt;S:Envelope xmlns:S="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" xmlns:exc14n="http://www.w3.org/2001/10/xml-exc-c14n#" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd" xmlns:xs="http://www.w3.org/2001/XMLSchema"&gt;
+  &lt;S:Header/&gt;
+  &lt;S:Body wsu:Id="_5002"&gt;
+    &lt;ns2:getCurrentDateSecuredResponse xmlns:ns2="http://wsproxy.error.be/"&gt;
+      &lt;return&gt;2013-10-29T14:40:36.357+01:00&lt;/return&gt;
+    &lt;/ns2:getCurrentDateSecuredResponse&gt;
+  &lt;/S:Body&gt;
+&lt;/S:Envelope&gt;
+ </pre>
+
+Until now all tests have been done simulating an internal client accessing an external service. In case you want to use the module to do the inverse; serving external clients accessing internally hosted services, it is more of the same. For each internally hosted service to which the module will forward you would have to register a target URL using the <i>endpoint.target.url.mapping</i> configuration parameter. Interceptors continue working the same way, but remember that for example for message security you probably want the Wss4jSecurityInterceptor to be configured on the inbound side, as in this scenario the inbound side is the external facing side. There is no issue in configuring the Wss4jSecurityInterceptor on both inbound and outbound side for different service; all configuration is based on a per service basis.
+
+For example: service x (identified by namespace and payload root element) is an internal hosted service. Service y is an external service which internal clients want to access. For securing our internal service x we would be adding Wss4jSecurityInterceptor as service specific inbound interceptor in the <a href="https://github.com/koen-serneels/ws-proxy/blob/master/src/main/java/be/error/wsproxy/configuration/interceptors/InboundInterceptors.java" target="_blank">InboundInterceptors</a> configuration. This interceptor will thus only be active on the wsproxy endpoint (only serving the inbound side, in this example the external facing side) and only for service x. For securing the calls to service y, we would register Wss4jSecurityInterceptor in <a href="https://github.com/koen-serneels/ws-proxy/blob/master/src/main/java/be/error/wsproxy/configuration/interceptors/OutboundInterceptors.java" target="_blank">OutboundInterceptors</a>, adding message security for messages being sent to the external service y by the wsproxy module.
+
+Ok, that's about it! Feel free to drop me a message if this was somehow useful or if you have ideas for improvement!

@@ -1,0 +1,14 @@
+<div class="recent-box">
+  <h2 class="recent-title">Recent post</h2>
+  <div class="recent-list">
+    {% for post in site.posts offset:0 limit:3 %}
+      {% if post.title %}
+
+	<div style="margin-bottom: 15px; display: inline-block; text-align:center;">
+        <a href="{{ root_url }}{{ post.url }}" class="recent-item"><span>{{ post.title }}</span></a>
+	</div>
+
+      {% endif %}
+    {% endfor %}
+  </div>
+</div> <!-- End Recent-Box -->

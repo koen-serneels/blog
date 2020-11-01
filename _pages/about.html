@@ -1,0 +1,39 @@
+---
+layout: home-page
+title: About
+permalink: /about/
+---
+<div class="small-wrapper">
+  <div class="about-container">
+    <section class="about-header" style="text-align:justify;">
+      <div class="author-image-container">
+        <img src="{{site.baseurl}}/assets/img/{% if site.author-pic %}{{site.author-pic}}{% endif %}" alt="{{site.author}}">
+      </div>
+<p>
+Hi. My name is Koen Serneels, I'm a senior software engineer developing enterprise software for the last 16 years with mainly Java, Java EE and Spring.
+<p>
+I started my career wit the Belgian social security, developing highly transactional Java-based applications with legacy integration. After that I started working for Electronic Data Systems (EDS) and later Hewlett-Packard (HP). 
+<p>
+At the moment I'm self-employed offering development consultancy service under the company name CRUNCHTECH. Currently I'm working on the flemish fiscal platform for the Flemish government in Belgium (VFP) where I'm the tech lead of the taxation subsystem and the flemish fiscal tax portal (take a look at what we build: <a href="https://belastingen.fenb.be" target="_blank">https://belastingen.fenb.be</a> note: only available in Dutch). Besides coaching people and trying new stuff, my main interests go to things that have to do with networks, integration, tranformation and security. I'm also a fan of IoT and elektronics all together.
+<p>
+Once a week I also teach a graduate course "Software Development with Java" (evening class) at UCLL in Leuven, Belgium. Some years ago I also wrote a book together with Marten Deinum (<a href="https://www.apress.com/gp/book/9781430241553" target="_blank">https://www.apress.com/gp/book/9781430241553</a>).
+<div>
+<span style="">I'm always open for interesting opportunities, so if you have something that might be of interest feel free to contact me at</span>
+    <img src="/blog/assets/img/email.png" style="vertical-align:middle">
+</div>
+
+    </section>
+    <section class="about-body">
+      <ul class="contact-list">
+      {% if site.email %}
+        <li class="email"><a href="mailto:{{site.email}}"><i class="fa fa-envelope-o"></i></a></li>
+      {% endif %}
+
+      {% if site.linkedin %}
+        <li class="linkedin"><a href="https://in.linkedin.com/in/{{site.linkedin}}" target="_blank"><i class="fa fa-linkedin"></i></a></li>
+      {% endif %}
+
+      </ul>
+    </section> <!-- End About Body-->
+  </div> <!-- End About Container -->
+</div> <!-- End Small Wrapper -->

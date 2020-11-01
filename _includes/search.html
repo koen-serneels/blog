@@ -1,0 +1,42 @@
+
+		{% raw %}
+		<script id="search-results-template" type="text/mustache">
+			<div style="background-color: white; padding:10px;">
+			{{#entries}}
+			<article>
+				<a href="/blog{{url}}">{{title}}</a>
+			</article>
+			{{/entries}}
+
+			<div id="close" style="margin-top:30x; text-align: center; cursor: pointer;">
+					[Close <span class="search-icon-close"><i class="fa fa-times" aria-hidden="true"></i></span>]
+			      </div>
+			</div>
+
+
+		</script>
+		{% endraw %}
+  
+
+  
+		<script type="text/javascript">
+		$(function() {
+			$('#search-input,#search-input-mbl').each(function (){	
+				$(this).lunrSearch({
+					indexUrl: '/blog/js/index.json',           // URL of the `index.json` index data for your site
+					results:  '#results-container',          // jQuery selector for the search results container
+					entries:  '.entries',                 // jQuery selector for the element to contain the results list, must be a child of the results element above.
+					template: '#search-results-template',  // jQuery selector for the Mustache.js template
+					titleMsg  : '',   // message attached in front of results (can be empty)
+	      				emptyMsg  : '<p>Nothing found.</p>'   
+				});			 			
+			});
+
+			$(document).on('click', '#close', function(){
+				$('#results-container').hide();
+			});
+		});
+		</script>
+
+
+
